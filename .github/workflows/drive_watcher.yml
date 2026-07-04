@@ -1,0 +1,46 @@
+name: Drive Watcher
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-auth google-auth-oauthlib google-api-python-client requests
+
+      - name: Restore page token
+        run: |
+          if [ -f page_token.txt ]; then
+            echo "Token file exists"
+          else
+            echo "No token file yet"
+          fi
+
+      - name: Run drive watcher
+        env:
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_drive.py
+
+      - name: Save page token
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add page_token.txt
+          git diff --staged --quiet || git commit -m "Update page token"
+          git push  
