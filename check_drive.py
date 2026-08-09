@@ -7,7 +7,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 # ═══════════════════════════════════════════════════════════════════
-# CONFIGURATION — Edit only this section
+# CONFIGURATION — Only edit this section
 # ═══════════════════════════════════════════════════════════════════
 
 WATCHED_FOLDERS = [
@@ -25,7 +25,7 @@ SKIP_FOLDERS = {
 
 AUTH_EMAIL             = 'codeenma1440@gmail.com'
 PAGE_TOKEN_FILE        = 'page_token.txt'
-NEW_FILE_THRESHOLD_SEC = 60  # seconds difference between created/modified to consider file as new
+NEW_FILE_THRESHOLD_SEC = 60
 
 # ═══════════════════════════════════════════════════════════════════
 # DO NOT EDIT BELOW THIS LINE
@@ -39,12 +39,12 @@ TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 ACTIVE_FOLDERS = [f.strip() for f in WATCHED_FOLDERS if f.strip()]
 
 if not ACTIVE_FOLDERS:
-    print("No drives configured. Add folder IDs to WATCHED_FOLDERS.")
+    print("No drives configured.")
     exit(0)
 
 print(f"Watching {len(ACTIVE_FOLDERS)} drive(s).")
 
-# ── Google Auth ────────────────────────────────────────────────────
+# ── Auth ───────────────────────────────────────────────────────────
 creds = Credentials(
     token=token_data.get('token'),
     refresh_token=token_data.get('refresh_token'),
@@ -58,7 +58,7 @@ if creds.expired and creds.refresh_token:
 
 service = build('drive', 'v3', credentials=creds)
 
-# ── Folder info cache ──────────────────────────────────────────────
+# ── Cache ──────────────────────────────────────────────────────────
 _cache = {}
 
 def get_info(fid):
@@ -116,10 +116,21 @@ def build_path(fid, root_id):
         current = parents[0] if parents else None
     return parts
 
-def shorten_path(parts, levels=3):
-    if len(parts) <= levels:
-        return ' › '.join(parts)
-    return '...› ' + ' › '.join(parts[-levels:])
+def format_path(parts, new_folder_name=None):
+    """Format path vertically. If new_folder_name given, append it marked as New."""
+    if not parts:
+        return '📂 Unknown'
+    lines = []
+    for i, part in enumerate(parts):
+        indent = '  ' * i
+        if i == 0:
+            lines.append(f"📂 {part}")
+        else:
+            lines.append(f"{indent}↳ {part}")
+    if new_folder_name:
+        indent = '  ' * len(parts)
+        lines.append(f"{indent}↳ 📂 {new_folder_name} *(New)*")
+    return '\n'.join(lines)
 
 # ── Formatting ─────────────────────────────────────────────────────
 MIME_LABELS = {
@@ -133,18 +144,22 @@ MIME_LABELS = {
     'image/png': 'PNG',
     'image/gif': 'GIF',
     'video/mp4': 'MP4',
+    'video/x-matroska': 'MKV',
     'audio/mpeg': 'MP3',
     'application/zip': 'ZIP',
     'application/x-rar-compressed': 'RAR',
+    'application/x-7z-compressed': '7Z',
     'text/plain': 'TXT',
     'text/html': 'HTML',
+    'text/css': 'CSS',
+    'text/x-python': 'Python',
+    'application/json': 'JSON',
+    'application/javascript': 'JavaScript',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PowerPoint',
     'application/x-msdownload': 'EXE',
-    'text/x-python': 'Python',
-    'application/json': 'JSON',
-    'application/javascript': 'JavaScript',
+    'application/octet-stream': 'Binary',
 }
 
 def fmt_type(mime, name):
@@ -153,18 +168,6 @@ def fmt_type(mime, name):
     if name and '.' in name:
         return name.rsplit('.', 1)[-1].upper()
     return 'File'
-
-def fmt_size(s):
-    if not s:
-        return 'N/A'
-    try:
-        s = int(s)
-    except:
-        return 'N/A'
-    if s < 1024:       return f"{s} B"
-    if s < 1024**2:    return f"{s/1024:.1f} KB"
-    if s < 1024**3:    return f"{s/1024**2:.1f} MB"
-    return f"{s/1024**3:.1f} GB"
 
 def fmt_time(t):
     if not t:
@@ -212,12 +215,12 @@ if os.path.exists(PAGE_TOKEN_FILE):
     with open(PAGE_TOKEN_FILE) as f:
         page_token = f.read().strip()
     if not page_token or not page_token.isdigit():
-        print("Invalid token found — resetting.")
+        print("Invalid token — resetting.")
         r = service.changes().getStartPageToken().execute()
         page_token = r['startPageToken']
         with open(PAGE_TOKEN_FILE, 'w') as f:
             f.write(page_token)
-        print(f"Fresh token saved: {page_token}. Waiting for next run.")
+        print(f"Fresh token: {page_token}. Waiting for next run.")
         exit(0)
     print(f"Resuming from token: {page_token}")
 else:
@@ -264,8 +267,6 @@ while True:
         parents   = f.get('parents', [])
         created   = f.get('createdTime', '')
         modified  = f.get('modifiedTime', '')
-        size      = f.get('size', '')
-        link      = f.get('webViewLink', '')
 
         if not parents:
             continue
@@ -280,48 +281,45 @@ while True:
 
         root_id = find_watched_root(check_id)
         if not root_id:
-            print(f"Skipped (outside watched folders): {name}")
+            print(f"Skipped (outside watched): {name}")
             continue
 
-        if is_folder:
-            path_parts = build_path(parent_id, root_id)
-            path_parts.append(name)
-        else:
-            path_parts = build_path(parent_id, root_id)
-
-        short_path = shorten_path(path_parts)
-        file_link  = f"{link}?authuser={AUTH_EMAIL}" if link else '#'
         file_is_new = is_new_file(created, modified)
 
         if is_folder:
+            # Path = parent path, new folder name shown separately
+            parent_path_parts = build_path(parent_id, root_id)
+            vertical = format_path(parent_path_parts, new_folder_name=name)
             msg = (
-                f"📁 *Drive Notifier*\n\n"
-                f"📂 *New Folder Created!*\n"
-                f"*Path:* `{short_path}`\n"
-                f"*Created:* {fmt_time(created)}\n"
-                f"🔗 [Open Folder]({file_link})"
+                f"📁 *Drive Notifier*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📂 *New Folder Created*\n\n"
+                f"{vertical}\n\n"
+                f"🕐 {fmt_time(created)}"
             )
         elif file_is_new:
+            path_parts = build_path(parent_id, root_id)
+            vertical   = format_path(path_parts)
             msg = (
-                f"📁 *Drive Notifier*\n\n"
-                f"🆕 *New File Uploaded!*\n"
-                f"*Path:* `{short_path}`\n"
-                f"*File:* {name}\n"
-                f"*Type:* {fmt_type(mime, name)}\n"
-                f"*Size:* {fmt_size(size)}\n"
-                f"*Uploaded:* {fmt_time(created)}\n"
-                f"🔗 [Open File]({file_link})"
+                f"📁 *Drive Notifier*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🆕 *New File Uploaded*\n\n"
+                f"{vertical}\n\n"
+                f"📄 `{name}`\n"
+                f"🗂 {fmt_type(mime, name)}\n"
+                f"🕐 {fmt_time(created)}"
             )
         else:
+            path_parts = build_path(parent_id, root_id)
+            vertical   = format_path(path_parts)
             msg = (
-                f"📁 *Drive Notifier*\n\n"
-                f"✏️ *File Modified!*\n"
-                f"*Path:* `{short_path}`\n"
-                f"*File:* {name}\n"
-                f"*Type:* {fmt_type(mime, name)}\n"
-                f"*Size:* {fmt_size(size)}\n"
-                f"*Modified:* {fmt_time(modified)}\n"
-                f"🔗 [Open File]({file_link})"
+                f"📁 *Drive Notifier*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"✏️ *File Modified*\n\n"
+                f"{vertical}\n\n"
+                f"📄 `{name}`\n"
+                f"🗂 {fmt_type(mime, name)}\n"
+                f"🕐 {fmt_time(modified)}"
             )
 
         send_telegram(msg)
