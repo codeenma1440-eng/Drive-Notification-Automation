@@ -11,11 +11,17 @@ from googleapiclient.discovery import build
 # ═══════════════════════════════════════════════════════════════════
 
 WATCHED_FOLDERS = {
-    'VORMS':                   '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD',
+    '3rdYr_CSC_2026-27':       '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD',
     'Repati Kosam':            '1NhK3dPc_y7HKGpOiTbQod-KMkaNSBo3Z',
-    '3rdYr_CSC_2026-27':       '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j',
+    'VORMS':                   '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j',
     # 'Drive 4': '',
     # 'Drive 5': '',
+}
+
+# Folder IDs to completely skip — not scanned, not reported, not recursed into.
+SKIP_FOLDERS = {
+    '1-pKjtGbx9mnEeRkVqHovCXpGaSbhi9IK',  # 1stYr folder
+    '1vPMXSB0_Vvy1JGCFij25gq1kBtx00gaZ',  # 2ndYr folder
 }
 
 MANIFEST_FILE = 'manifest.json'   # snapshot of everything seen last run
@@ -166,13 +172,19 @@ def list_children(folder_id):
 def walk_folder(folder_id, path_names, drive_name, seen):
     """Recursively walk a folder tree, filling `seen` with {id: item_info}."""
     global total_scanned_folders, total_scanned_items
+    if folder_id in SKIP_FOLDERS:
+        print(f"  Skipping (excluded): {' > '.join(path_names)}")
+        return
     total_scanned_folders += 1
     print(f"  Scanning: {' > '.join(path_names)}")
     children = list_children(folder_id)
     for item in children:
-        total_scanned_items += 1
         item_id = item['id']
         is_folder = item['mimeType'] == 'application/vnd.google-apps.folder'
+        if is_folder and item_id in SKIP_FOLDERS:
+            print(f"  Skipping (excluded): {' > '.join(path_names + [item['name']])}")
+            continue
+        total_scanned_items += 1
         seen[item_id] = {
             'name': item['name'],
             'mime': item['mimeType'],
