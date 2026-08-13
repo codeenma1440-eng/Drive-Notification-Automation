@@ -285,21 +285,5 @@ for n in notifications:
 with open(MANIFEST_FILE, 'w') as f:
     json.dump(new_manifest, f)
 
-# ── Scan summary (always sent, so you know it's alive) ─────────────
-summary_lines = [
-    "📁 *Drive Notifier — Scan Complete*",
-    "━━━━━━━━━━━━━━━",
-]
-for drive_name in ACTIVE:
-    count = len(new_manifest.get(drive_name, {}))
-    tag = " (baseline)" if drive_name in first_run_drives else ""
-    summary_lines.append(f"📂 {drive_name}: {count} items{tag}")
-summary_lines.append(f"\n🔎 Folders scanned: {total_scanned_folders}")
-summary_lines.append(f"📄 Items checked: {total_scanned_items}")
-summary_lines.append(f"🔔 Notifications sent: {total_notified}")
-if total_notified == 0:
-    summary_lines.append("\n_No new or modified files this scan._")
-
-send_telegram('\n'.join(summary_lines))
-
 print(f"\nDone. Folders scanned: {total_scanned_folders} | Items checked: {total_scanned_items} | Notified: {total_notified}")
+print("(No Telegram summary/heartbeat sent — only real file/folder events are pushed.)")
