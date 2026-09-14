@@ -22,6 +22,7 @@ WATCHED_FOLDERS = {
 SKIP_FOLDERS = {
     '1-pKjtGbx9mnEeRkVqHovCXpGaSbhi9IK',  # 1stYr folder
     '1vPMXSB0_Vvy1JGCFij25gq1kBtx00gaZ',  # 2ndYr folder
+    '1FjW39Bjw5HokWUtENI2RyMQbTdCwFzAA',  #FSD - 11 PROGRAM MORE LIBRARIES
 }
 
 MANIFEST_FILE = 'manifest.json'   # snapshot of everything seen last run
