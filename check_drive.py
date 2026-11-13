@@ -1,21 +1,31 @@
+"""Drive watcher — one drive per run.
+
+Usage:  python check_drive.py <drive_key>      (keys defined in DRIVES below)
+
+Each drive has its own workflow, its own schedule, its own manifest file
+(manifests/<key>.json) and its own concurrency group, so drives never
+interfere with each other. All of them post to the same Telegram chat.
+"""
 import os
+import sys
 import json
+import time
+import threading
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 # ═══════════════════════════════════════════════════════════════════
-# CONFIGURATION — Only edit this section
+# CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 
-WATCHED_FOLDERS = {
-    '3rdYr_CSC_2026-27':       '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD',
-    'Repati Kosam':            '1NhK3dPc_y7HKGpOiTbQod-KMkaNSBo3Z',
-    'VORMS':                   '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j',
-    # 'Drive 4': '',
-    # 'Drive 5': '',
+DRIVES = {
+    '3rdyr':  {'name': '3rdYr_CSC_2026-27', 'id': '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD'},
+    'repati': {'name': 'Repati Kosam',      'id': '1NhK3dPc_y7HKGpOiTbQod-KMkaNSBo3Z'},
+    'vorms':  {'name': 'VORMS',             'id': '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j'},
 }
 
 # Folder IDs to completely skip — not scanned, not reported, not recursed into.
@@ -25,25 +35,27 @@ SKIP_FOLDERS = {
     '1FjW39Bjw5HokWUtENI2RyMQbTdCwFzAA',  # FSD - 11 PROGRAM MORE LIBRARIES
 }
 
-MANIFEST_FILE = 'manifest.json'
+SCAN_WORKERS = 8          # parallel Drive API requests inside one scan
+TELEGRAM_GAP = 1.1        # seconds between messages (Telegram: ~1 msg/s per chat)
+FOLDER_MIME = 'application/vnd.google-apps.folder'
 
 # ═══════════════════════════════════════════════════════════════════
-# DO NOT EDIT BELOW THIS LINE
+# SETUP
 # ═══════════════════════════════════════════════════════════════════
+
+if len(sys.argv) != 2 or sys.argv[1] not in DRIVES:
+    sys.exit(f"Usage: python check_drive.py <{'|'.join(DRIVES)}>")
+
+KEY        = sys.argv[1]
+DRIVE_NAME = DRIVES[KEY]['name']
+ROOT_ID    = DRIVES[KEY]['id']
+MANIFEST_FILE = os.path.join('manifests', f'{KEY}.json')
 
 token_data       = json.loads(os.environ['GDRIVE_TOKEN'])
 client_data      = json.loads(os.environ['GDRIVE_CLIENT_SECRET'])
 TELEGRAM_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-ACTIVE = {name: fid.strip() for name, fid in WATCHED_FOLDERS.items() if fid.strip()}
-if not ACTIVE:
-    print("No drives configured.")
-    exit(0)
-
-print(f"Watching {len(ACTIVE)} drive(s): {', '.join(ACTIVE.keys())}")
-
-# ── Auth ───────────────────────────────────────────────────────────
 creds = Credentials(
     token=token_data.get('token'),
     refresh_token=token_data.get('refresh_token'),
@@ -52,10 +64,15 @@ creds = Credentials(
     client_secret=client_data['installed']['client_secret'],
     scopes=token_data.get('scopes'),
 )
-if creds.expired and creds.refresh_token:
+if creds.expired or not creds.token:
     creds.refresh(Request())
 
-service = build('drive', 'v3', credentials=creds)
+_local = threading.local()
+def get_service():
+    """httplib2 is not thread-safe: one Drive client per worker thread."""
+    if not hasattr(_local, 'svc'):
+        _local.svc = build('drive', 'v3', credentials=creds, cache_discovery=False)
+    return _local.svc
 
 # ── Escape special chars for MarkdownV2 ───────────────────────────
 def esc(s):
@@ -64,25 +81,35 @@ def esc(s):
         s = s.replace(ch, '\\' + ch)
     return s
 
-# ── Telegram ───────────────────────────────────────────────────────
+# ── Telegram (retries on 429 / network errors; returns True only if delivered) ──
 def send_telegram(msg):
-    try:
-        r = requests.post(
-            f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
-            json={
-                'chat_id': TELEGRAM_CHAT_ID,
-                'text': msg,
-                'parse_mode': 'MarkdownV2',
-                'disable_web_page_preview': True,
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            print(f"Telegram error {r.status_code}: {r.text}")
-        else:
-            print("Telegram sent OK.")
-    except Exception as e:
-        print(f"Telegram exception: {e}")
+    for attempt in range(5):
+        try:
+            r = requests.post(
+                f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
+                json={
+                    'chat_id': TELEGRAM_CHAT_ID,
+                    'text': msg,
+                    'parse_mode': 'MarkdownV2',
+                    'disable_web_page_preview': True,
+                },
+                timeout=20,
+            )
+            if r.status_code == 200:
+                return True
+            if r.status_code == 429:
+                wait = r.json().get('parameters', {}).get('retry_after', 5)
+                print(f"Telegram 429, waiting {wait}s")
+                time.sleep(wait + 1)
+                continue
+            if 400 <= r.status_code < 500:
+                print(f"Telegram rejected message ({r.status_code}): {r.text}")
+                return False
+            print(f"Telegram {r.status_code}, retrying")
+        except requests.RequestException as e:
+            print(f"Telegram exception: {e}")
+        time.sleep(2 * (attempt + 1))
+    return False
 
 # ── Formatting helpers ─────────────────────────────────────────────
 MIME_LABELS = {
@@ -145,156 +172,122 @@ def format_path(path_names, new_name=None, is_new_folder=False):
             lines.append(f"{indent}↳ {esc(new_name)}")
     return '\n'.join(lines)
 
-# ── Manifest (previous snapshot) ──────────────────────────────────
-if os.path.exists(MANIFEST_FILE):
+# ── Manifest: {file_id: modifiedTime}. Missing file = first run (baseline only) ──
+first_run = not os.path.exists(MANIFEST_FILE)
+old = {}
+if not first_run:
     with open(MANIFEST_FILE) as f:
-        try:
-            manifest = json.load(f)
-        except Exception:
-            manifest = {}
-else:
-    manifest = {}
+        old = json.load(f)          # corrupt manifest -> crash loudly, never silently reset
 
-first_run_drives = [name for name in ACTIVE if name not in manifest]
-
-new_manifest = {}
-total_scanned_folders = 0
-total_scanned_items = 0
-total_notified = 0
-
-FIELDS = 'nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents)'
+# ── Scan (parallel, level by level) ───────────────────────────────
+FIELDS = 'nextPageToken, files(id,name,mimeType,createdTime,modifiedTime)'
 
 def list_children(folder_id):
-    items, page_token = [], None
+    svc, items, page_token = get_service(), [], None
     while True:
-        resp = service.files().list(
+        resp = svc.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields=FIELDS,
-            pageSize=200,
-            pageToken=page_token,
-        ).execute()
+            fields=FIELDS, pageSize=1000, pageToken=page_token,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute(num_retries=5)
         items.extend(resp.get('files', []))
         page_token = resp.get('nextPageToken')
         if not page_token:
-            break
-    return items
+            return items
 
-def walk_folder(folder_id, path_names, drive_name, seen):
-    global total_scanned_folders, total_scanned_items
-    if folder_id in SKIP_FOLDERS:
-        print(f"  Skipping (excluded): {' > '.join(path_names)}")
-        return
-    total_scanned_folders += 1
-    print(f"  Scanning: {' > '.join(path_names)}")
-    children = list_children(folder_id)
-    for item in children:
-        item_id = item['id']
-        is_folder = item['mimeType'] == 'application/vnd.google-apps.folder'
-        if is_folder and item_id in SKIP_FOLDERS:
-            print(f"  Skipping (excluded): {' > '.join(path_names + [item['name']])}")
-            continue
-        total_scanned_items += 1
-        seen[item_id] = {
-            'name': item['name'],
-            'mime': item['mimeType'],
-            'created': item.get('createdTime', ''),
-            'modified': item.get('modifiedTime', ''),
-            'is_folder': is_folder,
-            'path': path_names,
-            'drive': drive_name,
-        }
-        if is_folder:
-            walk_folder(item_id, path_names + [item['name']], drive_name, seen)
+def scan():
+    seen = {}                                   # id -> info
+    frontier = [(ROOT_ID, [DRIVE_NAME])]
+    folders = 0
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        while frontier:
+            folders += len(frontier)
+            results = list(pool.map(lambda fp: list_children(fp[0]), frontier))
+            nxt = []
+            for (fid, path), children in zip(frontier, results):
+                for it in children:
+                    is_folder = it['mimeType'] == FOLDER_MIME
+                    if is_folder and it['id'] in SKIP_FOLDERS:
+                        continue
+                    seen[it['id']] = {
+                        'name': it['name'], 'mime': it['mimeType'],
+                        'created': it.get('createdTime', ''),
+                        'modified': it.get('modifiedTime', ''),
+                        'is_folder': is_folder, 'path': path,
+                    }
+                    if is_folder:
+                        nxt.append((it['id'], path + [it['name']]))
+            frontier = nxt
+    return seen, folders
 
-# ── Scan each watched drive ────────────────────────────────────────
-notifications = []
+t0 = time.time()
+print(f"=== {DRIVE_NAME} ({KEY}) ===")
+if ROOT_ID in SKIP_FOLDERS:
+    sys.exit("Root folder is in SKIP_FOLDERS")
+# Drive returns an EMPTY list (not an error) for folders it can't see, so verify access first.
+try:
+    root = get_service().files().get(
+        fileId=ROOT_ID, fields='id,name,mimeType', supportsAllDrives=True).execute(num_retries=5)
+except Exception as e:
+    sys.exit(f"Cannot access root folder {ROOT_ID} for '{KEY}': {e}\n"
+             f"Check the folder ID and that the token's account has access to it.")
+if root['mimeType'] != FOLDER_MIME:
+    sys.exit(f"{ROOT_ID} is not a folder (it is {root['mimeType']}).")
+print(f"Root OK: '{root['name']}'")
+seen, n_folders = scan()      # any API failure raises -> nothing saved, retried next run
+print(f"Scanned {n_folders} folders / {len(seen)} items in {time.time()-t0:.0f}s")
 
-for drive_name, root_id in ACTIVE.items():
-    print(f"\n=== Drive: {drive_name} ===")
-    seen = {}
-    walk_folder(root_id, [drive_name], drive_name, seen)
-    new_manifest[drive_name] = seen
+if not seen and first_run:
+    sys.exit(f"'{KEY}' scan returned 0 items on first run — not saving an empty baseline. "
+             f"Folder may be empty, or the account may lack access to its contents.")
 
-    old_seen = manifest.get(drive_name, {})
-
-    if drive_name in first_run_drives:
-        print(f"  First run for '{drive_name}' — baseline saved ({len(seen)} items), no notifications sent.")
-        continue
-
+# ── Diff ───────────────────────────────────────────────────────────
+new_manifest = {i: v['modified'] for i, v in seen.items()}
+if first_run:
+    print("First run — baseline saved, no notifications.")
+    notifications = []
+else:
+    notifications = []
     for item_id, info in seen.items():
-        old_info = old_seen.get(item_id)
-        if old_info is None:
+        base = {'id': item_id, 'path': info['path'], 'name': info['name'], 'mime': info['mime']}
+        if item_id not in old:
             if info['is_folder']:
-                notifications.append({
-                    'kind': 'folder',
-                    'drive': drive_name,
-                    'path': info['path'],
-                    'name': info['name'],
-                    'time': info['created'],
-                })
+                notifications.append({**base, 'kind': 'folder', 'time': info['created']})
             else:
-                notifications.append({
-                    'kind': 'new_file',
-                    'drive': drive_name,
-                    'path': info['path'],
-                    'name': info['name'],
-                    'mime': info['mime'],
-                    'time': info['created'],
-                })
-        else:
-            if (not info['is_folder']) and info['modified'] != old_info.get('modified'):
-                notifications.append({
-                    'kind': 'modified',
-                    'drive': drive_name,
-                    'path': info['path'],
-                    'name': info['name'],
-                    'mime': info['mime'],
-                    'time': info['modified'],
-                })
+                notifications.append({**base, 'kind': 'new_file', 'time': info['created']})
+        elif not info['is_folder'] and info['modified'] != old[item_id]:
+            notifications.append({**base, 'kind': 'modified', 'time': info['modified']})
 
-# ── Send notifications ─────────────────────────────────────────────
+# ── Notify (oldest first) ──────────────────────────────────────────
+notifications.sort(key=lambda n: n['time'])
+drive_esc = esc(DRIVE_NAME)
+sent = failed = 0
 for n in notifications:
-    drive_esc = esc(n['drive'])
-    time_esc  = esc(fmt_time(n['time']))
-
+    time_esc = esc(fmt_time(n['time']))
+    head = f"📁 *Drive Notifier* — _{drive_esc}_\n━━━━━━━━━━━━━━━\n"
     if n['kind'] == 'folder':
-        vertical = format_path(n['path'], new_name=n['name'], is_new_folder=True)
-        msg = (
-            f"📁 *Drive Notifier* — _{drive_esc}_\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"📂 *New Folder Created*\n\n"
-            f"{vertical}\n\n"
-            f"🕐 {time_esc}"
-        )
-    elif n['kind'] == 'new_file':
-        vertical = format_path(n['path'])
-        msg = (
-            f"📁 *Drive Notifier* — _{drive_esc}_\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🆕 *New File Uploaded*\n\n"
-            f"{vertical}\n\n"
-            f"📄 `{esc(n['name'])}`\n"
-            f"🗂 {esc(fmt_type(n['mime'], n['name']))}\n"
-            f"🕐 {time_esc}"
-        )
-    else:  # modified
-        vertical = format_path(n['path'])
-        msg = (
-            f"📁 *Drive Notifier* — _{drive_esc}_\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"✏️ *File Modified*\n\n"
-            f"{vertical}\n\n"
-            f"📄 `{esc(n['name'])}`\n"
-            f"🗂 {esc(fmt_type(n['mime'], n['name']))}\n"
-            f"🕐 {time_esc}"
-        )
-    send_telegram(msg)
-    total_notified += 1
-    print(f"Notified [{n['kind']}]: {n['name']}")
+        msg = head + f"📂 *New Folder Created*\n\n{format_path(n['path'], new_name=n['name'], is_new_folder=True)}\n\n🕐 {time_esc}"
+    else:
+        title = '🆕 *New File Uploaded*' if n['kind'] == 'new_file' else '✏️ *File Modified*'
+        msg = (head + f"{title}\n\n{format_path(n['path'])}\n\n"
+               f"📄 `{esc(n['name'])}`\n🗂 {esc(fmt_type(n['mime'], n['name']))}\n🕐 {time_esc}")
+    if send_telegram(msg):
+        sent += 1
+        print(f"Notified [{n['kind']}]: {n['name']}")
+        time.sleep(TELEGRAM_GAP)
+    else:
+        failed += 1
+        print(f"FAILED [{n['kind']}]: {n['name']} — will retry next run")
+        # leave the item in its OLD state so the next run detects it again
+        if n['id'] in old:
+            new_manifest[n['id']] = old[n['id']]
+        else:
+            new_manifest.pop(n['id'], None)
 
-# ── Save manifest ──────────────────────────────────────────────────
-with open(MANIFEST_FILE, 'w') as f:
-    json.dump(new_manifest, f)
-
-print(f"\nDone. Folders scanned: {total_scanned_folders} | Items checked: {total_scanned_items} | Notified: {total_notified}")
-print("(No Telegram summary/heartbeat sent — only real file/folder events are pushed.)")
+# ── Save manifest (atomic) ─────────────────────────────────────────
+os.makedirs('manifests', exist_ok=True)
+tmp = MANIFEST_FILE + '.tmp'
+with open(tmp, 'w') as f:
+    json.dump(new_manifest, f, separators=(',', ':'), sort_keys=True)
+os.replace(tmp, MANIFEST_FILE)
+print(f"Done in {time.time()-t0:.0f}s | notified {sent} | failed {failed}")
