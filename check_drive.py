@@ -205,9 +205,11 @@ def scan():
             results = list(pool.map(lambda fp: list_children(fp[0]), frontier))
             nxt = []
             for (fid, path), children in zip(frontier, results):
+                print(f"  Scanning: {' > '.join(path)}  ({len(children)} items)", flush=True)
                 for it in children:
                     is_folder = it['mimeType'] == FOLDER_MIME
                     if is_folder and it['id'] in SKIP_FOLDERS:
+                        print(f"  Skipping (excluded): {' > '.join(path + [it['name']])}")
                         continue
                     seen[it['id']] = {
                         'name': it['name'], 'mime': it['mimeType'],
@@ -222,6 +224,8 @@ def scan():
 
 t0 = time.time()
 print(f"=== {DRIVE_NAME} ({KEY}) ===")
+print("Run started (IST):", (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime('%d %b %Y, %I:%M:%S %p'))
+print("Previous manifest:", "NONE (first run)" if first_run else f"{len(old)} items")
 if ROOT_ID in SKIP_FOLDERS:
     sys.exit("Root folder is in SKIP_FOLDERS")
 # Drive returns an EMPTY list (not an error) for folders it can't see, so verify access first.
@@ -257,6 +261,10 @@ else:
                 notifications.append({**base, 'kind': 'new_file', 'time': info['created']})
         elif not info['is_folder'] and info['modified'] != old[item_id]:
             notifications.append({**base, 'kind': 'modified', 'time': info['modified']})
+
+print(f"Changes found: {sum(n['kind']=='new_file' for n in notifications)} new files, "
+      f"{sum(n['kind']=='folder' for n in notifications)} new folders, "
+      f"{sum(n['kind']=='modified' for n in notifications)} modified")
 
 # ── Notify (oldest first) ──────────────────────────────────────────
 notifications.sort(key=lambda n: n['time'])
