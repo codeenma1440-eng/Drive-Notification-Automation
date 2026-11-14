@@ -1,12 +1,11 @@
 # Drive-Notification-Automation
 
-One workflow per drive, each with its own schedule, manifest and concurrency group.
+Watches 3 Google Drive folders and sends a Telegram message when a file or folder is added, or a file is modified.
 
-| Drive | Workflow | Run At   |
-|---|---|---|---|
-| Drive 01 | `watch_3rdyr.yml` | every 10 min | 
-| Drive 02 | `watch_repati.yml` | every 30 min) | 
-| Drive 03 | `watch_vorms.yml` | every 30 min |
+## Drives
 
-Delete a manifest file to re-baseline that drive (next run sends no notifications).
-Add a drive: new entry in `DRIVES` in `check_drive.py` + copy a workflow file.
+| Drive    | Workflow file        | Runs every |
+|----------|----------------------|------------|
+| Drive 01 | `drive1_watcher.yml` | 10 minutes |
+| Drive 02 | `drive2_watcher.yml` | 30 minutes |
+| Drive 03 | `drive3_watcher.yml` | 20 minutes |
