@@ -2,7 +2,7 @@
 
 One workflow per drive, each with its own schedule, manifest and concurrency group.
 
-| Drive | Workflow | Cron | Manifest |
+| Drive | Workflow | Run At   |
 |---|---|---|---|
 | Drive 01 | `watch_3rdyr.yml` | every 10 min | 
 | Drive 02 | `watch_repati.yml` | every 30 min) | 
