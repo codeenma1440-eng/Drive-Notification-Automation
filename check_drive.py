@@ -1,9 +1,9 @@
 """Drive watcher — one drive per run.
 
-Usage:  python check_drive.py <drive_key>      (keys defined in DRIVES below)
+Usage:  python check_drive.py <drive1|drive2|drive3>
 
 Each drive has its own workflow, its own schedule, its own manifest file
-(manifests/<key>.json) and its own concurrency group, so drives never
+(manifests/<name>.json) and its own concurrency group, so drives never
 interfere with each other. All of them post to the same Telegram chat.
 """
 import os
@@ -23,9 +23,9 @@ from googleapiclient.discovery import build
 # ═══════════════════════════════════════════════════════════════════
 
 DRIVES = {
-    '3rdyr':  {'name': '3rdYr_CSC_2026-27', 'id': '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD'},
-    'repati': {'name': 'Repati Kosam',      'id': '1NhK3dPc_y7HKGpOiTbQod-KMkaNSBo3Z'},
-    'vorms':  {'name': 'VORMS',             'id': '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j'},
+    'drive1': {'name': '3rdYr_CSC_2026-27', 'id': '1-7b6q7t6gvkAtE0xAlpCvxmbB4FRoVYD', 'manifest': '3rdyr'},
+    'drive2': {'name': 'Repati Kosam',      'id': '1NhK3dPc_y7HKGpOiTbQod-KMkaNSBo3Z', 'manifest': 'repati'},
+    'drive3': {'name': 'VORMS',             'id': '1v4qVS-_WBi1B-Qm2bj-SasZNfuBfYq1j', 'manifest': 'vorms'},
 }
 
 # Folder IDs to completely skip — not scanned, not reported, not recursed into.
@@ -43,13 +43,15 @@ FOLDER_MIME = 'application/vnd.google-apps.folder'
 # SETUP
 # ═══════════════════════════════════════════════════════════════════
 
-if len(sys.argv) != 2 or sys.argv[1] not in DRIVES:
-    sys.exit(f"Usage: python check_drive.py <{'|'.join(DRIVES)}>")
+# Drive key comes from the command line (python check_drive.py drive1)
+# or from the DRIVE_KEY environment variable.
+KEY = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('DRIVE_KEY', '')
+if KEY not in DRIVES:
+    sys.exit(f"Unknown drive '{KEY}'. Use one of: {', '.join(DRIVES)}")
 
-KEY        = sys.argv[1]
 DRIVE_NAME = DRIVES[KEY]['name']
 ROOT_ID    = DRIVES[KEY]['id']
-MANIFEST_FILE = os.path.join('manifests', f'{KEY}.json')
+MANIFEST_FILE = os.path.join('manifests', DRIVES[KEY]['manifest'] + '.json')
 
 token_data       = json.loads(os.environ['GDRIVE_TOKEN'])
 client_data      = json.loads(os.environ['GDRIVE_CLIENT_SECRET'])
